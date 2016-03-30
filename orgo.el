@@ -1,29 +1,4 @@
-;;; test.el --- a simple package                     -*- lexical-binding: t; -*-
-
-;; Copyright (C) 2016  Ben Postlethwaite
-
-;; Author: Ben Postlethwaite
-;; Keywords: lisp
-;; Version: 0.0.1
-
-;; This program is free software; you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation, either version 3 of the License, or
-;; (at your option) any later version.
-
-;; This program is distributed in the hope that it will be useful,
-;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
-
-;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
-;;; Commentary:
-
-;; Put a description of the package here
-
-;;; Code:
+;; -*- mode: Lisp; lexical-binding: t; -*-
 
 (require 'json)
 (require 'cl-lib)
@@ -34,63 +9,75 @@
       (replace-match "" t t s)
     s))
 
-(defun extract-issue-title (pair) (car (cdr pair)))
-(defun extract-values (vec) (mapcar 'cdr vec))
+(defun get-value (item key)
+  (cond ((string= key "URL") (nth 0 item))
+        ((string= key "Title") (nth 1 item))
+        ((string= key "Description") (nth 2 item))
+        ((string= key "Date") (nth 3 item))))
 
-(defun get-issues (state)
-  "return an issue which is tuple like structure (url title)"
+(defun get-title (item) (get-value item "Title"))
+(defun get-URL (item) (get-value item "URL"))
+
+(defun nth-elem (element xs)
+  "Return zero-indexed position of ELEMENT in list XS, or nil if absent."
+  (let ((idx  0))
+    (catch 'nth-elt
+      (dolist (x  xs)
+        (when (equal element x) (throw 'nth-elt idx))
+        (setq idx  (1+ idx)))
+      nil)))
+
+(defun format-json-resp (vec)
+  (let ((values (mapcar 'cdr vec))
+        (keys (mapcar 'car vec)))
+    (list (nth (nth-elem "URL" keys) values)
+          (nth (nth-elem "Title" keys) values)
+          (nth (nth-elem "Description" keys) values)
+          (nth (nth-elem "Date" keys) values))))
+
+(defun get-issues (service &rest args)
+  "return an issue which is tuple structure (url title)"
   (let ((json-array-type 'list)
         (json-object-type 'alist)
-        (cmd (format "/home/ben/programming/go/bin/orgo %s" state)))
-    (mapcar 'extract-values (json-read-from-string
-                             (shell-command-to-string cmd)))))
+        (json-key-type 'string)
+        (cmd (format "/home/ben/programming/go/bin/orgo %s %s" service (mapconcat 'identity args " "))))
+    (mapcar 'format-json-resp (json-read-from-string
+                               (shell-command-to-string cmd)))))
 
 (defun insertion-point ()
   "Header insertion points. Find the first headline with :sync: true tag"
   (car
    (cl-remove nil
               (org-map-entries
-               '(if (string=(org-entry-get (point) "sync") "true")
+               '(if (string=(org-entry-get (point) "orgo-insert") "github")
                     (progn
                       (show-children)
                       (point))
                   nil)))))
 
-(defun get-todo-titles ()
-  "Get all titles of headline todos.
-This will only find headline todos (not other org-mode elements)
-Must implement other search criteria with org-element-map.
-Note that org-element-property :title dismisses the URL but we need to trim
-the extra white space from the end of the title and the start of the URL"
-  (mapcar (lambda (hl) (s-trim-right (car (org-element-property :title hl))))
-          (org-element-map
-              (org-element-parse-buffer)
-              'headline
-            (lambda (hl) (if (org-element-property :todo-keyword hl) hl nil )))))
+(defun get-todo-items ()
+  "Get (URL title) pairs of all todos in document."
+  (mapcar
+   (lambda (comps) (list (nth 6 comps) (nth 4 comps)))
+   (remove-if-not
+    (lambda (comps) (and (nth 2 comps) (nth 6 comps)) )
+    (org-map-entries
+     (lambda () (append (org-heading-components) (list (org-entry-get (point) "URL"))))))))
 
-(defun get-issues-to-create ()
+
+(defun get-issues-not-matching-todos (service &rest args)
   "for each issue in open github issues check if the issue isn't in the current todos
 and it isn't return it"
-  (let ((open-issues (get-issues "open"))
-        (todo-titles (get-todo-titles)))
+  (let ((open-issues (apply 'get-issues service args))
+        (todo-urls (mapcar 'get-URL (get-todo-items))))
     (cl-remove nil
-               (mapcar (lambda (issue) (if (member (extract-issue-title issue) todo-titles) nil issue))
+               (mapcar (lambda (issue) (if (member (get-URL issue) todo-urls) nil issue))
                        open-issues))))
 
-(defun get-todos-to-close ()
-  "for each issue in closed github issues check if the issue is in the current todos
-and if it is return it"
-  (let ((closed-issues (get-issues "closed"))
-        (todo-titles (get-todo-titles)))
-    (cl-remove nil
-               (mapcar (lambda (issue) (if (member (extract-issue-title issue) todo-titles) issue nil))
-                       closed-issues))))
-
-(defun close-todos-by-title (title)
-  (progn
-    (goto-char 1)
-    (while (search-forward title nil t)
-      (org-todo 'done))))
+(defun close-todo-matching-item (item)
+  (org-map-entries
+   (lambda () (if (string= (org-entry-get (point) "URL") (get-URL item))
+                  (org-todo "done")))))
 
 (defun insert-issues-as-todos (issues pos)
   (mapc
@@ -98,17 +85,15 @@ and if it is return it"
      (progn
        (goto-char pos)
        (org-insert-heading-after-current)
-       (org-do-demote)
-       (insert (format "TODO %s %s" (extract-issue-title issue) (car issue)))))
+       (insert (format "TODO %s" (get-title issue)))
+       (org-insert-property-drawer)
+       (org-entry-put (point) "URL" (get-URL issue))
+       nil))
    issues))
-
 
 (defun sync-todos ()
   (interactive)
   (progn
-    (mapcar 'close-todos-by-title (mapcar 'extract-issue-title (get-todos-to-close)))
-    (insert-issues-as-todos (get-issues-to-create) (insertion-point))))
-
-
-(provide 'orgo)
-;;; orgo.el ends here
+    (mapc 'close-todo-matching-item (get-issues-not-matching-todos "github" "--state closed" "bpostlethwaite" "Plotly" "streambed"))
+    (insert-issues-as-todos (get-issues-not-matching-todos "github" "--state open" "bpostlethwaite" "Plotly" "streambed") (insertion-point))
+    (insert-issues-as-todos (get-issues-not-matching-todos "gcal") (insertion-point))))
