@@ -15,8 +15,9 @@
         ((string= key "Description") (nth 2 item))
         ((string= key "Date") (nth 3 item))))
 
-(defun get-title (item) (get-value item "Title"))
-(defun get-URL (item) (get-value item "URL"))
+(defun get-item-title (item) (get-value item "Title"))
+(defun get-item-URL (item) (get-value item "URL"))
+(defun get-item-date (item) (get-value item "Date"))
 
 (defun nth-elem (element xs)
   "Return zero-indexed position of ELEMENT in list XS, or nil if absent."
@@ -69,27 +70,33 @@
   "for each issue in open github issues check if the issue isn't in the current todos
 and it isn't return it"
   (let ((open-issues (apply 'get-issues service args))
-        (todo-urls (mapcar 'get-URL (get-todo-items))))
+        (todo-urls (mapcar 'get-item-URL (get-todo-items))))
     (cl-remove nil
-               (mapcar (lambda (issue) (if (member (get-URL issue) todo-urls) nil issue))
+               (mapcar (lambda (issue) (if (member (get-item-URL issue) todo-urls) nil issue))
                        open-issues))))
 
 (defun close-todo-matching-item (item)
   (org-map-entries
-   (lambda () (if (string= (org-entry-get (point) "URL") (get-URL item))
+   (lambda () (if (string= (org-entry-get (point) "URL") (get-item-URL item))
                   (org-todo "done")))))
 
 (defun insert-issues-as-todos (issues pos)
-  (mapc
-   (lambda (issue)
-     (progn
-       (goto-char pos)
-       (org-insert-heading-after-current)
-       (insert (format "TODO %s" (get-title issue)))
-       (org-insert-property-drawer)
-       (org-entry-put (point) "URL" (get-URL issue))
-       nil))
-   issues))
+  (progn
+    (mapc
+     (lambda (issue)
+       (let ((title (get-item-title issue))
+             (URL (get-item-URL issue))
+             (date (get-item-date issue)))
+         (progn
+           (goto-char pos)
+           (org-insert-heading-after-current)
+           (insert (format "TODO %s" title))
+           (org-demote)
+           (org-insert-property-drawer)
+           (org-entry-put (point) "URL" URL)
+           (if (not (string= "" date)) (org-schedule t date)))))
+     issues)
+    nil))
 
 (defun sync-todos ()
   (interactive)
